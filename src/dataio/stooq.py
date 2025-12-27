@@ -60,5 +60,5 @@ def load_multiple_symbols(symbols: list, start_date: str, end_date: str, n_jobs:
     def _fetch(s: str) -> dict:
         return {"symbol_name": s, "data": get_from_stooq(s, start_date, end_date)}
 
-    results = Parallel(n_jobs=n_jobs)(delayed(_fetch)(symbol) for symbol in symbols)
+    results = Parallel(n_jobs=n_jobs, prefer="threads")(delayed(_fetch)(symbol) for symbol in symbols)
     return list(results) if results is not None else []
