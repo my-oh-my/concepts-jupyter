@@ -42,11 +42,7 @@ profile_default/
 ipython_config.py
 
 # Data Science / Large Files
-# Ignore all data by default
-data/*
-# Keep the directory structure
-!data/raw/
-!data/raw/.gitkeep
+data/
 
 # Unit test / coverage reports
 htmlcov/
