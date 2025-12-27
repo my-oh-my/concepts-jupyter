@@ -26,8 +26,7 @@ This repository provides a robust framework for financial data analysis. It comb
 │   ├── dataio/       # Data loading and processing utilities
 │   └── config.py     # Centralized configuration
 ├── data/             # Local data storage (ignored by git)
-│   ├── raw/          # Original, immutable data files
-│   └── processed/    # Cleaned/transformed data
+│   └── raw/          # Original, immutable data files
 ├── tests/            # Test suite (placeholder)
 ├── Makefile          # Common development tasks
 ├── pyproject.toml    # Project metadata and dependencies
