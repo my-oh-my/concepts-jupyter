@@ -43,3 +43,9 @@ repos:
       - id: nbqa-pylint
         additional_dependencies: [pylint==3.1.0]
         args: ["--rcfile=.pylintrc"]
+
+  - repo: https://github.com/mwouts/jupytext
+    rev: v1.18.1
+    hooks:
+      - id: jupytext
+        args: ["--sync"]

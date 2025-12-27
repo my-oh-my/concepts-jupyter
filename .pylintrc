@@ -8,6 +8,8 @@ load-plugins=
 disable=C0114, # missing-module-docstring
         C0115, # missing-class-docstring
         C0116, # missing-function-docstring
+        W0104, # pointless-statement (common in notebooks)
+        E0401, # import-error (common false positive in notebooks)
 
 [REPORTS]
 output-format=text

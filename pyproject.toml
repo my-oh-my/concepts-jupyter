@@ -1,3 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["src"]
+package-dir = {"src" = "src"}
+
+[project]
+name = "concepts-jupyter"
+version = "0.1.0"
+description = "Market analysis concepts using Jupyter Notebooks"
+dependencies = [
+    "numpy",
+    "pandas",
+    "plotly",
+    "jupyterlab",
+    "notebook",
+    "nbformat",
+    "joblib",
+    "scipy",
+    "requests",
+    "yfinance",
+]
+
 [tool.black]
 line-length = 120
 target-version = ['py310']
@@ -25,3 +50,8 @@ strict_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 show_error_codes = true
+
+[tool.jupytext]
+formats = "notebooks///ipynb,notebooks///py:percent"
+# This ensures that when we save a notebook in Jupyter,
+# a corresponding .py file is created/updated in the same directory.
