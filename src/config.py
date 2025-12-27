@@ -11,11 +11,9 @@ DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
 
 # Sub-directories
 RAW_DATA_DIR = DATA_DIR / "raw"
-PROCESSED_DATA_DIR = DATA_DIR / "processed"
 
 # Ensure directories exist
 RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
-PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # API Settings
 API_KEY = os.getenv("API_KEY", "")
