@@ -15,8 +15,8 @@
 # %% [markdown]
 # # Medoid Path & Probability Bands Analysis
 #
-# This notebook demonstrates the **Medoid** approach for identifying the "most likely path" within a collection of
-# time series.
+# This notebook demonstrates the **Medoid** approach for identifying the "most likely path" within a collection
+# of time series.
 #
 # We will:
 # 1. Download **Ethereum (ETH-USD)** 1-hour data.
@@ -34,13 +34,14 @@ from typing import Any, Dict
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go  # type: ignore
+from plotly.subplots import make_subplots  # type: ignore
 
 # Add the src directory to the system path to allow importing modules
+# pylint: disable=wrong-import-position
 sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "..")))
 
 # Import the data loader
-# pylint: disable=wrong-import-position
-from src.dataio.yfinance_loader import fetch_market_data
+from src.dataio.yfinance_loader import fetch_market_data  # pylint: disable=wrong-import-position
 
 # %% [markdown]
 # ## 1. Core Algorithm: Medoid & Probability Channel
@@ -82,6 +83,39 @@ def get_most_likely_channel(input_matrix: np.ndarray, probability: float = 0.75)
     upper_bound = np.percentile(input_matrix, (1.0 - tail) * 100, axis=0)
 
     return {"medoid": most_likely_path, "lower": lower_bound, "upper": upper_bound, "index": medoid_idx}
+
+
+def find_nearest_path(partial_path: np.ndarray, history_matrix: np.ndarray) -> Dict[str, Any]:
+    """
+    Finds the nearest neighbor in the history matrix for a given partial path.
+
+    Args:
+        partial_path (np.ndarray): Shape (k,) - The first k hours of a day.
+        history_matrix (np.ndarray): Shape (N, 24) - The historical dataset.
+
+    Returns:
+        dict: Contains the matched full path, its index, and the distance.
+    """
+    k = len(partial_path)
+    if k == 0:
+        raise ValueError("Partial path cannot be empty.")
+
+    # Slice history to the same length as partial_path
+    history_slice = history_matrix[:, :k]
+
+    # Calculate Euclidean distance between partial_path and all historical segments
+    # Shape: (N,)
+    distances = np.sqrt(np.sum(np.square(history_slice - partial_path), axis=1))
+
+    # Find the index of the minimum distance
+    best_match_idx = np.argmin(distances)
+    best_match_path = history_matrix[best_match_idx]
+
+    return {
+        "matched_path": best_match_path,
+        "index": best_match_idx,
+        "distance": distances[best_match_idx],
+    }
 
 
 # %% [markdown]
@@ -129,14 +163,12 @@ print(f"Loaded {len(df)} data points.")
 # 2. Reshape into Daily Paths
 
 # Add date and hour info
-if isinstance(df.index, pd.DatetimeIndex):
-    df["Date"] = df.index.date
-    df["Hour"] = df.index.hour
-else:
-    # Fallback/Conversion if not DatetimeIndex (though we tried to set it above)
+# Cast index to DatetimeIndex to ensure .date and .hour properties are accessible for MyPy
+if not isinstance(df.index, pd.DatetimeIndex):
     df.index = pd.to_datetime(df.index)
-    df["Date"] = df.index.date
-    df["Hour"] = df.index.hour
+
+df["Date"] = df.index.date
+df["Hour"] = df.index.hour
 
 # Pivot to create a matrix where rows are Dates and columns are Hours (0..23)
 # This might have missing values if some hours are missing
@@ -149,9 +181,8 @@ print(f"Data reshaped. Complete days found: {len(daily_matrix_df)}")
 # 3. Calculate Log-Returns from Previous Close (P0)
 
 # We need the previous day's close for each day in our filtered list.
-# Since we might have gaps after filtering, we look back at the original df or shift the pivoted one if days are
-# consecutive.
-# A robust way is to re-index the pivoted DF to ensure we can access row i-1.
+# Since we might have gaps after filtering, we look back at the original df or shift the pivoted one
+# if days are consecutive. A robust way is to re-index the pivoted DF to ensure we can access row i-1.
 
 dates = daily_matrix_df.index
 valid_paths = []
@@ -268,3 +299,117 @@ fig.update_layout(
 )
 
 fig.show()
+
+# %% [markdown]
+# ## 5. Partial Path Matching (Forecasting / Nearest Neighbor)
+#
+# Here we simulate a real-world scenario:
+# - We have observed the starting $k$ hours of a new day.
+# - We want to find the **most similar day** from history to predict how the rest of the day might unfold.
+#
+# **Procedure:**
+# 1. Select a random "Target Day" from our dataset to act as the "New Day".
+# 2. Remove this Target Day from the "Historical Library" (to avoid matching with itself).
+# 3. For $k$ in [2, 6, 12, 18, 23]:
+#     - Take the first $k$ hours of the Target Day.
+#     - Find the nearest neighbor in the Library (Euclidean distance on first $k$ steps).
+#     - Plot the Input vs. the Matched Outcome.
+
+# %%
+# 1. Select a random target index
+np.random.seed(42)  # For reproducibility in this demo
+target_idx = np.random.randint(0, len(series_matrix))
+
+target_full_path = series_matrix[target_idx]
+target_date = valid_dates[int(target_idx)]
+
+print(f"Target Day Selected: {target_date} (Index {target_idx})")
+
+# 2. Create the Library (History excluding the target)
+# We basically just mask out the target index
+library_indices = np.arange(len(series_matrix)) != target_idx
+library_matrix = series_matrix[library_indices]
+library_dates = [d for i, d in enumerate(valid_dates) if i != target_idx]
+
+# 3. Run Matching for different Partial Lengths
+hours_to_test = [6, 12, 18, 23]
+
+# Create a subplot for each test case
+
+fig_match = make_subplots(
+    rows=2,
+    cols=2,
+    subplot_titles=[f"Input: {h} Hours" for h in hours_to_test],
+    shared_yaxes=True,
+    x_title="Hour of Day",
+    y_title="Log Return",
+)
+
+row_col_map = [(1, 1), (1, 2), (2, 1), (2, 2)]
+
+for hours_val, (r, c) in zip(hours_to_test, row_col_map):
+    # a. Slice the input
+    partial_input = target_full_path[:hours_val]
+
+    # b. Find nearest neighbor
+    match_result = find_nearest_path(partial_input, library_matrix)
+    matched_full_path = match_result["matched_path"]
+    matched_idx_in_lib = match_result["index"]
+    matched_date_str = library_dates[matched_idx_in_lib]
+
+    # c. Plotting
+
+    # Trace 1: The Matched Historical Path (Full Day)
+    # We plot this first so it's in the background relative to the input
+    fig_match.add_trace(
+        go.Scatter(
+            x=time_steps,
+            y=matched_full_path,
+            mode="lines",
+            line={"color": "blue", "width": 2, "dash": "dot"},
+            name=f"Matched: {matched_date_str}" if hours_val == hours_to_test[0] else None,
+            showlegend=(hours_val == hours_to_test[0]),
+        ),
+        row=r,
+        col=c,
+    )
+
+    # Trace 2: The 'Future' of the Target Path (Ground Truth) - Optional, for validation
+    # Let's plot the full target path in faint grey to see how good the prediction was
+    fig_match.add_trace(
+        go.Scatter(
+            x=time_steps,
+            y=target_full_path,
+            mode="lines",
+            line={"color": "grey", "width": 1},
+            name="Actual Full Path" if hours_val == hours_to_test[0] else None,
+            showlegend=(hours_val == hours_to_test[0]),
+        ),
+        row=r,
+        col=c,
+    )
+
+    # Trace 3: The Input Partial Path (What we observed)
+    fig_match.add_trace(
+        go.Scatter(
+            x=time_steps[:hours_val],
+            y=partial_input,
+            mode="lines+markers",
+            line={"color": "black", "width": 3},
+            marker={"size": 6},
+            name="Observed Input" if hours_val == hours_to_test[0] else None,
+            showlegend=(hours_val == hours_to_test[0]),
+        ),
+        row=r,
+        col=c,
+    )
+
+fig_match.update_layout(
+    title=f"Partial Path Matching: Simulating Forecasting for {target_date}",
+    height=800,
+    width=1000,
+    template="plotly_white",
+    hovermode="x unified",
+)
+
+fig_match.show()
