@@ -26,6 +26,7 @@
 # 5. Visualize the results using **Plotly**.
 
 # %%
+import math
 import os
 import sys
 from datetime import timedelta
@@ -174,6 +175,39 @@ df["Hour"] = df.index.hour
 # This might have missing values if some hours are missing
 daily_matrix_df = df.pivot(index="Date", columns="Hour", values="Close")
 
+# 2a. Separate "Live" (Incomplete) Day from History
+# Check if the last row is incomplete (has NaNs)
+last_date = daily_matrix_df.index[-1]
+last_row = daily_matrix_df.iloc[-1]
+
+LIVE_DAY_SERIES = None
+LIVE_DAY_DATE = None
+
+if last_row.isna().any():
+    print(f"Detected incomplete (live) data for: {last_date}")
+    # Extract valid values for the live day
+    live_day_prices = last_row.dropna().values
+    if len(live_day_prices) > 0:
+        LIVE_DAY_DATE = last_date
+        # We need the closest previous close (P0) to calculate returns
+        # The previous row in the pivot table (even if not strictly yesterday, it's the last known data)
+        # Note: Ideally we want strictly the previous day.
+        # If the dataframe is sorted, row -2 is the previous day relative to row -1.
+        prev_day_row = daily_matrix_df.iloc[-2]
+
+        # P0 is the last value (hour 23) of the previous row.
+        # If previous row is also incomplete at hour 23, we can't reliably calc P0 for standard logic.
+        # We assume history is mostly complete.
+        if not np.isnan(prev_day_row[23]):
+            p0_live = prev_day_row[23]
+            LIVE_DAY_SERIES = np.log(live_day_prices / p0_live)
+            print(f"Live day processed. Current hours: {len(LIVE_DAY_SERIES)}")
+        else:
+            print("Cannot calculate live returns: Previous day hour 23 is missing.")
+
+    # Remove the incomplete day from the dataframe so it doesn't mess up 'complete days' logic
+    daily_matrix_df = daily_matrix_df.drop(last_date)
+
 # Filter for complete days (must have exactly 24 hours)
 daily_matrix_df = daily_matrix_df.dropna()
 print(f"Data reshaped. Complete days found: {len(daily_matrix_df)}")
@@ -308,48 +342,117 @@ fig.show()
 # - We want to find the **most similar day** from history to predict how the rest of the day might unfold.
 #
 # **Procedure:**
-# 1. Select a random "Target Day" from our dataset to act as the "New Day".
+# 1. Select a "Target Day" (can be the latest day or a specific historic date).
 # 2. Remove this Target Day from the "Historical Library" (to avoid matching with itself).
-# 3. For $k$ in [2, 6, 12, 18, 23]:
+# 3. For each $k$ in user-defined `HOURS_TO_TEST` (e.g. [6, 12, 18, 23]):
 #     - Take the first $k$ hours of the Target Day.
 #     - Find the nearest neighbor in the Library (Euclidean distance on first $k$ steps).
 #     - Plot the Input vs. the Matched Outcome.
 
 # %%
-# 1. Select a random target index
-np.random.seed(42)  # For reproducibility in this demo
-target_idx = np.random.randint(0, len(series_matrix))
+# Configuration
+# ---------------------------------------------------------
+# Define the hours you want to check for partial matching
+# NOTE: If we are in "Live" mode (TARGET_DATE=None and live data exists),
+# this list is ignored, and we only test the current available hours.
+HOURS_TO_TEST = [6, 12, 18, 23]
 
-target_full_path = series_matrix[target_idx]
-target_date = valid_dates[int(target_idx)]
+# Define a specific target date to analyze (YYYY-MM-DD or None).
+# If None, the script will use:
+#   1. The LIVE incomplete day (if available) -> This is the "Real-Time Forecast".
+#   2. The LAST complete historical day (if no live data is available).
+TARGET_DATE = None  # e.g., "2024-01-15"
+# ---------------------------------------------------------
 
-print(f"Target Day Selected: {target_date} (Index {target_idx})")
+# Use the full history for matching library, unless we select a target from it
+library_matrix = series_matrix
+library_dates = valid_dates
 
-# 2. Create the Library (History excluding the target)
-# We basically just mask out the target index
-library_indices = np.arange(len(series_matrix)) != target_idx
-library_matrix = series_matrix[library_indices]
-library_dates = [d for i, d in enumerate(valid_dates) if i != target_idx]
+# Variables to hold our target info
+TARGET_PATH_FULL = None  # May be None if live
+TARGET_PATH_PARTIAL = None
+TARGET_DATE_STR = ""
+IS_LIVE_MODE = False
 
-# 3. Run Matching for different Partial Lengths
-hours_to_test = [6, 12, 18, 23]
+# 1. Determine Target Logic
+if TARGET_DATE:
+    # --- A. Specific Historic Date ---
+    print(f"Mode: Historic Specific Date ({TARGET_DATE})")
+    try:
+        t_date_obj = pd.to_datetime(TARGET_DATE).date()
+        date_indices = [i for i, d in enumerate(valid_dates) if d == t_date_obj]
 
-# Create a subplot for each test case
+        if not date_indices:
+            raise ValueError(f"Date {TARGET_DATE} not found in valid history.")
+
+        TARGET_IDX = date_indices[0]
+
+        # Remove target from library so we don't match with self
+        library_indices = np.arange(len(series_matrix)) != TARGET_IDX
+        library_matrix = series_matrix[library_indices]
+        library_dates = [d for i, d in enumerate(valid_dates) if i != TARGET_IDX]
+
+        TARGET_PATH_FULL = series_matrix[TARGET_IDX]
+        TARGET_DATE_STR = str(valid_dates[TARGET_IDX])
+
+    except Exception as e:
+        print(f"Error finding date {TARGET_DATE}: {e}")
+        # Fallback would happen here if we wanted loopback, but let's just raise/stop for clarity
+        raise
+else:
+    # --- B. Auto Mode (Live or Last Complete) ---
+    if LIVE_DAY_SERIES is not None:
+        print(f"Mode: LIVE Data detected ({LIVE_DAY_DATE})")
+        TARGET_PATH_PARTIAL = LIVE_DAY_SERIES
+        TARGET_DATE_STR = f"{LIVE_DAY_DATE} (LIVE)"
+        IS_LIVE_MODE = True
+
+        # In live mode, we simply use the current length of the day
+        HOURS_TO_TEST = [len(LIVE_DAY_SERIES)]
+
+        # Library is full series_matrix (since live day is effectively 'new N+1' day)
+    else:
+        print("Mode: No incomplete live data. Using LAST complete day.")
+        TARGET_IDX = len(series_matrix) - 1
+
+        # Remove target from library
+        library_indices = np.arange(len(series_matrix)) != TARGET_IDX
+        library_matrix = series_matrix[library_indices]
+        library_dates = [d for i, d in enumerate(valid_dates) if i != TARGET_IDX]
+
+        TARGET_PATH_FULL = series_matrix[TARGET_IDX]
+        TARGET_DATE_STR = str(valid_dates[TARGET_IDX])
+
+
+# 3. Dynamic Subplot Grid Calculation
+NUM_PLOTS = len(HOURS_TO_TEST)
+COLS = 2
+ROWS = math.ceil(NUM_PLOTS / COLS)
 
 fig_match = make_subplots(
-    rows=2,
-    cols=2,
-    subplot_titles=[f"Input: {h} Hours" for h in hours_to_test],
+    rows=ROWS,
+    cols=COLS,
+    subplot_titles=[f"Input: {h} Hours" for h in HOURS_TO_TEST],
     shared_yaxes=True,
     x_title="Hour of Day",
     y_title="Log Return",
 )
 
-row_col_map = [(1, 1), (1, 2), (2, 1), (2, 2)]
+# 4. Run Matching & Plotting
+for i, hours_val in enumerate(HOURS_TO_TEST):
+    # Determine row and col (1-based for Plotly)
+    r = (i // COLS) + 1
+    c = (i % COLS) + 1
 
-for hours_val, (r, c) in zip(hours_to_test, row_col_map):
     # a. Slice the input
-    partial_input = target_full_path[:hours_val]
+    if IS_LIVE_MODE and TARGET_PATH_PARTIAL is not None:
+        # Just use what we have (should match hours_val)
+        partial_input = TARGET_PATH_PARTIAL
+    elif TARGET_PATH_FULL is not None:
+        partial_input = TARGET_PATH_FULL[:hours_val]
+    else:
+        # Fallback safety
+        continue
 
     # b. Find nearest neighbor
     match_result = find_nearest_path(partial_input, library_matrix)
@@ -358,36 +461,37 @@ for hours_val, (r, c) in zip(hours_to_test, row_col_map):
     matched_date_str = library_dates[matched_idx_in_lib]
 
     # c. Plotting
+    show_legend = i == 0
 
     # Trace 1: The Matched Historical Path (Full Day)
-    # We plot this first so it's in the background relative to the input
     fig_match.add_trace(
         go.Scatter(
             x=time_steps,
             y=matched_full_path,
             mode="lines",
             line={"color": "blue", "width": 2, "dash": "dot"},
-            name=f"Matched: {matched_date_str}" if hours_val == hours_to_test[0] else None,
-            showlegend=(hours_val == hours_to_test[0]),
+            name=f"Matched: {matched_date_str}",  # Legend shows specific match date for first plot only
+            showlegend=show_legend,
         ),
         row=r,
         col=c,
     )
 
-    # Trace 2: The 'Future' of the Target Path (Ground Truth) - Optional, for validation
-    # Let's plot the full target path in faint grey to see how good the prediction was
-    fig_match.add_trace(
-        go.Scatter(
-            x=time_steps,
-            y=target_full_path,
-            mode="lines",
-            line={"color": "grey", "width": 1},
-            name="Actual Full Path" if hours_val == hours_to_test[0] else None,
-            showlegend=(hours_val == hours_to_test[0]),
-        ),
-        row=r,
-        col=c,
-    )
+    # Trace 2: The 'Future' of the Target Path (Ground Truth)
+    # Only if we have it (Historic Mode)
+    if not IS_LIVE_MODE and TARGET_PATH_FULL is not None:
+        fig_match.add_trace(
+            go.Scatter(
+                x=time_steps,
+                y=TARGET_PATH_FULL,
+                mode="lines",
+                line={"color": "grey", "width": 1},
+                name="Actual Full Path",
+                showlegend=show_legend,
+            ),
+            row=r,
+            col=c,
+        )
 
     # Trace 3: The Input Partial Path (What we observed)
     fig_match.add_trace(
@@ -397,16 +501,16 @@ for hours_val, (r, c) in zip(hours_to_test, row_col_map):
             mode="lines+markers",
             line={"color": "black", "width": 3},
             marker={"size": 6},
-            name="Observed Input" if hours_val == hours_to_test[0] else None,
-            showlegend=(hours_val == hours_to_test[0]),
+            name="Observed Input",
+            showlegend=show_legend,
         ),
         row=r,
         col=c,
     )
 
 fig_match.update_layout(
-    title=f"Partial Path Matching: Simulating Forecasting for {target_date}",
-    height=800,
+    title=f"Partial Path Matching: Simulating Forecasting for {TARGET_DATE_STR}",
+    height=max(500, 400 * ROWS),  # Adjust height based on rows
     width=1000,
     template="plotly_white",
     hovermode="x unified",
