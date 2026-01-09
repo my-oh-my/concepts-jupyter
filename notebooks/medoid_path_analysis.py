@@ -30,7 +30,7 @@ import math
 import os
 import sys
 from datetime import timedelta
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -86,16 +86,19 @@ def get_most_likely_channel(input_matrix: np.ndarray, probability: float = 0.75)
     return {"medoid": most_likely_path, "lower": lower_bound, "upper": upper_bound, "index": medoid_idx}
 
 
-def find_nearest_path(partial_path: np.ndarray, history_matrix: np.ndarray) -> Dict[str, Any]:
+def find_nearest_neighbors(
+    partial_path: np.ndarray, history_matrix: np.ndarray, n_neighbors: int = 1
+) -> List[Dict[str, Any]]:
     """
-    Finds the nearest neighbor in the history matrix for a given partial path.
+    Finds the nearest neighbors in the history matrix for a given partial path.
 
     Args:
         partial_path (np.ndarray): Shape (k,) - The first k hours of a day.
         history_matrix (np.ndarray): Shape (N, 24) - The historical dataset.
+        n_neighbors (int): Number of top matches to return.
 
     Returns:
-        dict: Contains the matched full path, its index, and the distance.
+        List[dict]: List of matches, each containing matched path, index, distance, and rank.
     """
     k = len(partial_path)
     if k == 0:
@@ -108,15 +111,23 @@ def find_nearest_path(partial_path: np.ndarray, history_matrix: np.ndarray) -> D
     # Shape: (N,)
     distances = np.sqrt(np.sum(np.square(history_slice - partial_path), axis=1))
 
-    # Find the index of the minimum distance
-    best_match_idx = np.argmin(distances)
-    best_match_path = history_matrix[best_match_idx]
+    # Find the indices of the k smallest distances
+    # np.argsort returns indices that sort the array. We take the first n_neighbors.
+    sorted_indices = np.argsort(distances)
+    top_indices = sorted_indices[:n_neighbors]
 
-    return {
-        "matched_path": best_match_path,
-        "index": best_match_idx,
-        "distance": distances[best_match_idx],
-    }
+    matches = []
+    for rank, neighbor_idx in enumerate(top_indices):
+        matches.append(
+            {
+                "matched_path": history_matrix[neighbor_idx],
+                "index": neighbor_idx,
+                "distance": distances[neighbor_idx],
+                "rank": rank + 1,
+            }
+        )
+
+    return matches
 
 
 # %% [markdown]
@@ -357,6 +368,9 @@ fig.show()
 # this list is ignored, and we only test the current available hours.
 HOURS_TO_TEST = [6, 12, 18, 23]
 
+# Number of nearest neighbors (top matches) to find and display
+NUM_MATCHES = 3
+
 # Define a specific target date to analyze (YYYY-MM-DD or None).
 # If None, the script will use:
 #   1. The LIVE incomplete day (if available) -> This is the "Real-Time Forecast".
@@ -425,6 +439,12 @@ else:
 
 
 # 3. Dynamic Subplot Grid Calculation
+RANK_STYLES = {
+    1: {"color": "blue", "dash": "dot", "width": 2},
+    2: {"color": "rgba(0, 0, 255, 0.6)", "dash": "dashdot", "width": 2},
+    "default": {"color": "rgba(0, 0, 255, 0.3)", "dash": "dash", "width": 1},
+}
+
 NUM_PLOTS = len(HOURS_TO_TEST)
 COLS = 2
 ROWS = math.ceil(NUM_PLOTS / COLS)
@@ -454,28 +474,39 @@ for i, hours_val in enumerate(HOURS_TO_TEST):
         # Fallback safety
         continue
 
-    # b. Find nearest neighbor
-    match_result = find_nearest_path(partial_input, library_matrix)
-    matched_full_path = match_result["matched_path"]
-    matched_idx_in_lib = match_result["index"]
-    matched_date_str = library_dates[matched_idx_in_lib]
+    # b. Find nearest neighbors (Top-N)
+    top_matches = find_nearest_neighbors(partial_input, library_matrix, n_neighbors=NUM_MATCHES)
 
     # c. Plotting
-    show_legend = i == 0
 
-    # Trace 1: The Matched Historical Path (Full Day)
-    fig_match.add_trace(
-        go.Scatter(
-            x=time_steps,
-            y=matched_full_path,
-            mode="lines",
-            line={"color": "blue", "width": 2, "dash": "dot"},
-            name=f"Matched: {matched_date_str}",  # Legend shows specific match date for first plot only
-            showlegend=show_legend,
-        ),
-        row=r,
-        col=c,
-    )
+    # Trace 1: The Matched Historical Paths (Loop through Top-N)
+    for match in top_matches:
+        match_rank = match["rank"]
+        matched_path_data = match["matched_path"]
+        matched_idx_lib = match["index"]
+        matched_date_label = library_dates[matched_idx_lib]
+
+        # Vary line style or opacity based on rank if desired
+        # Rank 1: Blue, Dot
+        # Rank 2: lighter Blue, DashDot
+        # Rank 3: cyan?
+
+        style = RANK_STYLES.get(match_rank, RANK_STYLES["default"])
+
+        show_legend = i == 0  # Only show legend for first subplot to avoid duplicates
+
+        fig_match.add_trace(
+            go.Scatter(
+                x=time_steps,
+                y=matched_path_data,
+                mode="lines",
+                line={"color": style["color"], "width": style["width"], "dash": style["dash"]},
+                name=f"Rank {match_rank}: {matched_date_label}",
+                showlegend=show_legend,
+            ),
+            row=r,
+            col=c,
+        )
 
     # Trace 2: The 'Future' of the Target Path (Ground Truth)
     # Only if we have it (Historic Mode)
@@ -487,7 +518,7 @@ for i, hours_val in enumerate(HOURS_TO_TEST):
                 mode="lines",
                 line={"color": "grey", "width": 1},
                 name="Actual Full Path",
-                showlegend=show_legend,
+                showlegend=(i == 0),
             ),
             row=r,
             col=c,
@@ -502,14 +533,14 @@ for i, hours_val in enumerate(HOURS_TO_TEST):
             line={"color": "black", "width": 3},
             marker={"size": 6},
             name="Observed Input",
-            showlegend=show_legend,
+            showlegend=(i == 0),
         ),
         row=r,
         col=c,
     )
 
 fig_match.update_layout(
-    title=f"Partial Path Matching: Simulating Forecasting for {TARGET_DATE_STR}",
+    title=f"Partial Path Matching (Top {NUM_MATCHES}): Simulating Forecasting for {TARGET_DATE_STR}",
     height=max(500, 400 * ROWS),  # Adjust height based on rows
     width=1000,
     template="plotly_white",
