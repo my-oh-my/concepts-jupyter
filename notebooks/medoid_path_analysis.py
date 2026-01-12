@@ -38,10 +38,16 @@ from src.dataio.yfinance_loader import fetch_market_data
 # ## 0. Global Settings
 
 # %%
-# Price Method: "Close" or "OHLC_Avg"
-# OHLC_Avg calculates (Open + High + Low + Close) / 4
+# 1. Data Source Settings
+SYMBOL = "ETH-USD"
+PERIOD = "730d"  # ~2 Years
+INTERVAL = "1h"
+
+# 2. Price Method Settings
+# Options: "Close", "OHLC_Avg" (uses average of O+H+L+C)
 PRICE_METHOD = "OHLC_Avg"
 
+# 3. Analysis Settings
 # Probability level for building the "normal" range (channel)
 PROBABILITY = 0.75
 
@@ -69,11 +75,6 @@ PROBABILITY = 0.75
 # - The path for Day D at hour h (0-23) is: $ \ln(P_{D,h} / P_{D-1, 23}) $.
 
 # %%
-# 1. Fetch Data
-SYMBOL = "ETH-USD"
-PERIOD = "730d"  # ~2 Years
-INTERVAL = "1h"
-
 print(f"Fetching {SYMBOL} data for the last {PERIOD}...")
 df = fetch_market_data(SYMBOL, PERIOD, INTERVAL)
 

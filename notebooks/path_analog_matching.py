@@ -41,19 +41,37 @@ from src.dataio.yfinance_loader import fetch_market_data
 # ## 0. Global Settings
 
 # %%
-# Price Method: "Close" or "OHLC_Avg"
-# OHLC_Avg calculates (Open + High + Low + Close) / 4
+# 1. Data Source Settings
+SYMBOL = "ETH-USD"
+PERIOD = "730d"
+INTERVAL = "1h"
+
+# 2. Price Method Settings
+# Options: "Close", "OHLC_Avg" (uses average of O+H+L+C)
 PRICE_METHOD = "OHLC_Avg"
+
+# 3. Matching Algorithm Settings
+# Define the hours you want to check for partial matching
+HOURS_TO_TEST = [6, 12, 18, 23]
+
+# Number of nearest neighbors (top matches) to find
+NUM_MATCHES = 3
+
+# Matching Window: Number of days to use for matching context (Current + History).
+MATCHING_WINDOW_DAYS = 2
+
+# Future Sessions: Number of full days to show after the matched day.
+FUTURE_SESSIONS = 1
+
+# 4. Target Settings
+# Define a specific target date to analyze (YYYY-MM-DD or None for Live/Last).
+TARGET_DATE = None
 
 
 # %% [markdown]
 # ## 1. Data Acquisition & Processing
 
 # %%
-SYMBOL = "ETH-USD"
-PERIOD = "730d"
-INTERVAL = "1h"
-
 print(f"Fetching {SYMBOL} data...")
 df = fetch_market_data(SYMBOL, PERIOD, INTERVAL)
 
@@ -93,20 +111,7 @@ print(f"Series Matrix shape: {series_matrix.shape}")
 # %%
 # Configuration
 # ---------------------------------------------------------
-# Define the hours you want to check for partial matching
-HOURS_TO_TEST = [6, 12, 18, 23]
-
-# Number of nearest neighbors (top matches) to find
-NUM_MATCHES = 3
-
-# Matching Window: Number of days to use for matching context (Current + History).
-MATCHING_WINDOW_DAYS = 2
-
-# Future Sessions: Number of full days to show after the matched day.
-FUTURE_SESSIONS = 1
-
-# Define a specific target date to analyze (YYYY-MM-DD or None for Live/Last).
-TARGET_DATE = None
+# Local processing variables
 # ---------------------------------------------------------
 
 # Maintain copies for matching
