@@ -35,7 +35,16 @@ from src.analysis.transformation import calculate_daily_log_returns, reshape_to_
 from src.dataio.yfinance_loader import fetch_market_data
 
 # %% [markdown]
-# ## 1. Core Algorithm: Medoid & Probability Channel
+# ## 0. Global Settings
+
+# %%
+# Price Method: "Close" or "OHLC_Avg"
+# OHLC_Avg calculates (Open + High + Low + Close) / 4
+PRICE_METHOD = "OHLC_Avg"
+
+# Probability level for building the "normal" range (channel)
+PROBABILITY = 0.75
+
 #
 # We utilize modular functions from `src/analysis` to:
 # - Calculate the Euclidean distance matrix between all paths.
@@ -83,26 +92,35 @@ if DATE_COLUMN in df.columns:
 if isinstance(df.columns, pd.MultiIndex):
     df.columns = df.columns.get_level_values(0)
 
-# Keep only Close price
-df = df[["Close"]].copy()
+# ---------------------------------------------------------
+# Apply selected price method
+# ---------------------------------------------------------
+
+if PRICE_METHOD == "OHLC_Avg":
+    df["OHLC_Avg"] = (df["Open"] + df["High"] + df["Low"] + df["Close"]) / 4
+    PRICE_COL = "OHLC_Avg"
+else:
+    PRICE_COL = "Close"
+
+# Keep necessary columns
+df = df[[PRICE_COL]].copy()
 df.dropna(inplace=True)
 
-print(f"Loaded {len(df)} data points.")
+print(f"Loaded {len(df)} data points using {PRICE_METHOD} method.")
 
 # %%
 # 2. Daily Matrix & Returns logic extracted to src.analysis.transformation
-daily_matrix_df, LIVE_DAY_SERIES, LIVE_DAY_DATE = reshape_to_daily_matrix(df)
+daily_matrix_df, LIVE_DAY_SERIES, LIVE_DAY_DATE = reshape_to_daily_matrix(df, price_col=PRICE_COL)
 series_matrix, valid_dates = calculate_daily_log_returns(daily_matrix_df)
 
 print(f"Data reshaped. Complete days found: {len(daily_matrix_df)}")
 print(f"Final Series Matrix shape: {series_matrix.shape} (Days x Hours)")
 
-# %% [markdown]
-# ## 3. Analysis
+# %%
+# 3. Analysis
 # We run the Medoid algorithm on our collection of log-return paths.
 
 # %%
-PROBABILITY = 0.75
 result = calculate_medoid_channel(series_matrix, probability=PROBABILITY)
 
 medoid_path = result["medoid"]
@@ -172,9 +190,9 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title=f"Medoid Path Analysis: ETH-USD Daily 1H Profiles (Sample of {len(series_matrix)} days)",
+    title=f"Medoid Path Analysis ({PRICE_METHOD}): ETH-USD Daily 1H Profiles (Sample of {len(series_matrix)} days)",
     xaxis_title="Hour of Day (0-23 UTC)",
-    yaxis_title="Log Return (vs Prev Day Close)",
+    yaxis_title=f"Log Return ({PRICE_METHOD} vs Prev Day Close)",
     template="plotly_white",
     hovermode="x unified",
 )

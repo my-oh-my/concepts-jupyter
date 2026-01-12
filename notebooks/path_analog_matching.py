@@ -38,6 +38,15 @@ from src.analysis.transformation import calculate_daily_log_returns, reshape_to_
 from src.dataio.yfinance_loader import fetch_market_data
 
 # %% [markdown]
+# ## 0. Global Settings
+
+# %%
+# Price Method: "Close" or "OHLC_Avg"
+# OHLC_Avg calculates (Open + High + Low + Close) / 4
+PRICE_METHOD = "OHLC_Avg"
+
+
+# %% [markdown]
 # ## 1. Data Acquisition & Processing
 
 # %%
@@ -57,14 +66,25 @@ if DATE_COLUMN in df.columns:
     df[DATE_COLUMN] = pd.to_datetime(df[DATE_COLUMN])
     df.set_index(DATE_COLUMN, inplace=True)
 
-df = df[["Close"]].copy()
+# Ensure simple index if MultiIndex columns are present (just in case)
+if isinstance(df.columns, pd.MultiIndex):
+    df.columns = df.columns.get_level_values(0)
+
+# Apply selected price method (configured in section 2)
+if PRICE_METHOD == "OHLC_Avg":
+    df["OHLC_Avg"] = (df["Open"] + df["High"] + df["Low"] + df["Close"]) / 4
+    PRICE_COL = "OHLC_Avg"
+else:
+    PRICE_COL = "Close"
+
+df = df[[PRICE_COL]].copy()
 df.dropna(inplace=True)
 
 # Transform into Daily Returns matrix
-daily_matrix_df, LIVE_DAY_SERIES, LIVE_DAY_DATE = reshape_to_daily_matrix(df)
+daily_matrix_df, LIVE_DAY_SERIES, LIVE_DAY_DATE = reshape_to_daily_matrix(df, price_col=PRICE_COL)
 series_matrix, valid_dates = calculate_daily_log_returns(daily_matrix_df)
 
-print(f"Data reshaped. Complete days: {len(daily_matrix_df)}")
+print(f"Data reshaped ({PRICE_METHOD}). Complete days: {len(daily_matrix_df)}")
 print(f"Series Matrix shape: {series_matrix.shape}")
 
 # %% [markdown]
@@ -260,10 +280,11 @@ for plot_idx, hours_val in enumerate(HOURS_TO_TEST):
     fig_match.add_vline(x=0, line_width=2, line_dash="solid", line_color="black", row=r, col=c)
 
 fig_match.update_layout(
-    title=f"Path Analog Matching ({MATCHING_WINDOW_DAYS}-Day Window) for {TARGET_DATE_STR}",
+    title=f"Path Analog Matching ({MATCHING_WINDOW_DAYS}-Day Window, {PRICE_METHOD}) for {TARGET_DATE_STR}",
     height=max(500, 500 * ROWS),
     width=1200,
     template="plotly_white",
     hovermode="x unified",
+    yaxis_title=f"Log Return ({PRICE_METHOD})",
 )
 fig_match.show()

@@ -10,14 +10,15 @@ import pandas as pd
 
 
 def reshape_to_daily_matrix(
-    df: pd.DataFrame,
+    df: pd.DataFrame, price_col: str = "Close"
 ) -> Tuple[pd.DataFrame, Optional[np.ndarray], Optional[date]]:
     """
     Reshapes raw OHLC 1h data into a (Date x Hour) pivot table.
     Identifies and returns the 'Live' (incomplete) day if present.
 
     Args:
-        df (pd.DataFrame): DataFrame with Datetime index and 'Close' column.
+        df (pd.DataFrame): DataFrame with Datetime index and OHLC columns.
+        price_col (str): The column name to use for price values. Defaults to "Close".
 
     Returns:
         Tuple: (daily_matrix_df, live_day_returns, live_day_date)
@@ -35,7 +36,7 @@ def reshape_to_daily_matrix(
     working_df["Hour"] = dt_index.hour
 
     # Pivot to create a matrix where rows are Dates and columns are Hours (0..23)
-    daily_matrix_df = working_df.pivot(index="Date", columns="Hour", values="Close")
+    daily_matrix_df = working_df.pivot(index="Date", columns="Hour", values=price_col)
 
     last_date = daily_matrix_df.index[-1]
     last_row = daily_matrix_df.iloc[-1]
