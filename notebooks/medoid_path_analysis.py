@@ -379,6 +379,9 @@ NUM_MATCHES = 3
 # 3 = Partial day + Previous 2 full days, etc.
 MATCHING_WINDOW_DAYS = 2
 
+# Future Sessions: Number of full days to show after the matched day.
+FUTURE_SESSIONS = 1
+
 # Define a specific target date to analyze (YYYY-MM-DD or None).
 # If None, the script will use:
 #   1. The LIVE incomplete day (if available) -> This is the "Real-Time Forecast".
@@ -488,6 +491,26 @@ def get_lookback_vector(matrix: np.ndarray, pivot_idx: int, days_back: int) -> A
     return np.concatenate(segments)
 
 
+def get_lookforward_vector(matrix: np.ndarray, pivot_idx: int, days_forward: int) -> np.ndarray:
+    """Concatenates `days_forward` full days following `pivot_idx`."""
+    if days_forward <= 0:
+        return np.array([])
+
+    segments = []
+    # Pivot index i is the 'Day 0'. We want indices (i+1) to (i+days_forward)
+    for i_f in range(1, days_forward + 1):
+        target_f_idx = pivot_idx + i_f
+        if target_f_idx < len(matrix):
+            segments.append(matrix[target_f_idx])
+        else:
+            # Not enough future data available
+            break
+
+    if not segments:
+        return np.array([])
+    return np.concatenate(segments)
+
+
 # 4. Run Matching & Plotting
 for plot_idx, hours_val in enumerate(HOURS_TO_TEST):
     # Determine row and col (1-based for Plotly)
@@ -554,42 +577,39 @@ for plot_idx, hours_val in enumerate(HOURS_TO_TEST):
 
     # --- D. Plotting setup ---
     # X-axis construction
-    # We have lookback_window * 24 hours of history, plus 24 hours of current day (future placeholder)
-    # 0 is the start of the current day.
-    # History is negative hours.
-
+    # X-axis construction
     HISTORY_HOURS = LOOKBACK_WINDOW * 24
-    # Create x-axis for plotting the FULL matched paths (History + Full Current Day)
-    # Range: from -HISTORY_HOURS to 23
-    plot_x_axis = np.arange(-HISTORY_HOURS, 24)
+    FUTURE_HOURS = FUTURE_SESSIONS * 24
 
-    # We need to map the matched index in `library_search_matrix` back to `candidate_indices`
-    # to retrieve the REAL full day for plotting the "Future" part of the match.
+    # Create x-axis for plotting the FULL potential matched paths (History + current day + Future sessions)
+    # Range: from -HISTORY_HOURS to (23 + FUTURE_HOURS)
+    plot_x_axis = np.arange(-HISTORY_HOURS, 24 + FUTURE_HOURS)
 
     show_legend = plot_idx == 0
 
     # Trace 1: The Matched Historical Paths
     for match in top_matches:
         match_rank = match["rank"]
-        # local index in the search matrix
         # actual index in `series_matrix`
         real_idx_lib = candidate_indices[match["index"]]
 
         matched_date_label = library_dates[real_idx_lib]
 
-        # Get the full data for plotting: History + Full Current Day
-        # History
+        # Get the full data for plotting: History + Current Full Day + Future Sessions
         hist_part = get_lookback_vector(series_matrix, real_idx_lib, LOOKBACK_WINDOW)
-        # Current Full Day
         curr_part = series_matrix[real_idx_lib]
+        fut_part = get_lookforward_vector(series_matrix, real_idx_lib, FUTURE_SESSIONS)
 
-        plot_data = np.concatenate([hist_part, curr_part])
+        plot_data = np.concatenate([hist_part, curr_part, fut_part])
+
+        # Ensure plot_x_axis matches plot_data length (handles end-of-series truncation)
+        current_trace_x = plot_x_axis[: len(plot_data)]
 
         style = RANK_STYLES.get(match_rank, RANK_STYLES["default"])
 
         fig_match.add_trace(
             go.Scatter(
-                x=plot_x_axis,
+                x=current_trace_x,
                 y=plot_data,
                 mode="lines",
                 line={"color": style["color"], "width": style["width"], "dash": style["dash"]},
@@ -600,28 +620,21 @@ for plot_idx, hours_val in enumerate(HOURS_TO_TEST):
             col=c,
         )
 
-    # Trace 2: The Target Path (History + [Current Partial ... Future?])
+    # Trace 2: The Target Path (History + [Current Full + Future?])
 
     # Construct Target Plot Data
-    # History part is already in target_Lookback_vec
-
-    # Current Part:
-    # If Live: We only have partial.
-    # If Historic: We have full.
-
     if IS_LIVE_MODE:
-        # For live, we can only plot History + Partial
-        # We need a specific x-axis for this trace since it's shorter
-        target_len = len(target_Lookback_vec) + len(target_current_partial)
-        # Start from -HISTORY_HOURS. Length is target_len.
-        target_x_axis = np.arange(-HISTORY_HOURS, -HISTORY_HOURS + target_len)
-
+        # Live: Only History + Partial
         target_plot_data = np.concatenate([target_Lookback_vec, target_current_partial])
-
+        target_x_axis = np.arange(-HISTORY_HOURS, -HISTORY_HOURS + len(target_plot_data))
     else:
-        # Historic: We can plot History + Full Current (Ground Truth)
-        target_x_axis = plot_x_axis
-        target_plot_data = np.concatenate([target_Lookback_vec, TARGET_PATH_FULL])
+        # Historic: History + Current Full + Future Sessions
+        target_hist = target_Lookback_vec
+        target_curr = TARGET_PATH_FULL
+        target_fut = get_lookforward_vector(series_matrix, TARGET_IDX_IN_FULL_SERIES, FUTURE_SESSIONS)
+
+        target_plot_data = np.concatenate([target_hist, target_curr, target_fut])
+        target_x_axis = plot_x_axis[: len(target_plot_data)]
 
     # Plot Ground Truth (Grey) - Only if Historic
     if not IS_LIVE_MODE:
@@ -639,9 +652,6 @@ for plot_idx, hours_val in enumerate(HOURS_TO_TEST):
         )
 
     # Trace 3: The Observed Input (Black)
-    # History + Current Partial
-    # (In live mode, this duplicates Trace 2 essentially, but styling differs)
-
     obs_x_axis = np.arange(-HISTORY_HOURS, -HISTORY_HOURS + len(full_target_vector))
 
     fig_match.add_trace(
@@ -658,8 +668,13 @@ for plot_idx, hours_val in enumerate(HOURS_TO_TEST):
         col=c,
     )
 
-    # Add a vertical line at 0 to separate Past Days from Current Day
-    fig_match.add_vline(x=0, line_width=1, line_dash="solid", line_color="black", row=r, col=c)
+    # Add vertical lines at every 24-hour interval to separate sessions
+    # Markers at -24, 0, 24, 48...
+    for hour_mark in range(-HISTORY_HOURS, 24 + FUTURE_HOURS, 24):
+        fig_match.add_vline(x=hour_mark, line_width=1, line_dash="solid", line_color="black", opacity=0.3, row=r, col=c)
+
+    # Special highlight for today's start
+    fig_match.add_vline(x=0, line_width=2, line_dash="solid", line_color="black", row=r, col=c)
 
 
 fig_match.update_layout(
