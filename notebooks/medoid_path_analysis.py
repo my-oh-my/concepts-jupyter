@@ -13,17 +13,19 @@
 # ---
 
 # %% [markdown]
-# # Medoid Path & Probability Bands Analysis
+# # Medoid Path & Partial Path Matching Analysis
 #
 # This notebook demonstrates the **Medoid** approach for identifying the "most likely path" within a collection
-# of time series.
+# of time series, and applies this concept to **Partial Path Matching** for forecasting.
 #
 # We will:
 # 1. Download **Ethereum (ETH-USD)** 1-hour data.
 # 2. Transform the continuous stream into a collection of **daily paths** (24 hours per day).
-# 3. Determine the **Medoid Path** among these daily paths.
+# 3. Determine the **Medoid Path** among these daily paths to find the "center" of behavior.
 # 4. Calculate **Probability Bands** (Statistical Channel) around the Medoid.
-# 5. Visualize the results using **Plotly**.
+# 5. Perform **Partial Path Matching** (Nearest Neighbor Search) to predict the outcome of the current day
+#    based on the most similar historical patterns (using a configurable multi-day lookback window).
+# 6. Visualize the results using **Plotly**.
 
 # %%
 import math
@@ -357,8 +359,8 @@ fig.show()
 # 2. Remove this Target Day from the "Historical Library" (to avoid matching with itself).
 # 3. For each $k$ in user-defined `HOURS_TO_TEST` (e.g. [6, 12, 18, 23]):
 #     - Take the first $k$ hours of the Target Day.
-#     - Find the nearest neighbor in the Library (Euclidean distance on first $k$ steps).
-#     - Plot the Input vs. the Matched Outcome.
+#     - Find the nearest neighbors in the Library (Euclidean distance on first $k$ steps + history window).
+#     - Plot the Input vs. the Matched Outcomes.
 
 # %%
 # Configuration
@@ -371,6 +373,12 @@ HOURS_TO_TEST = [6, 12, 18, 23]
 # Number of nearest neighbors (top matches) to find and display
 NUM_MATCHES = 3
 
+# Matching Window: Number of days to use for matching context.
+# 1 = Current partial day only.
+# 2 = Partial day + Previous full day.
+# 3 = Partial day + Previous 2 full days, etc.
+MATCHING_WINDOW_DAYS = 2
+
 # Define a specific target date to analyze (YYYY-MM-DD or None).
 # If None, the script will use:
 #   1. The LIVE incomplete day (if available) -> This is the "Real-Time Forecast".
@@ -379,14 +387,17 @@ TARGET_DATE = None  # e.g., "2024-01-15"
 # ---------------------------------------------------------
 
 # Use the full history for matching library, unless we select a target from it
-library_matrix = series_matrix
-library_dates = valid_dates
+# Use the full history for matching library, unless we select a target from it
+# Make copies to maintain data integrity
+library_matrix = series_matrix.copy()
+library_dates = list(valid_dates)
 
 # Variables to hold our target info
 TARGET_PATH_FULL = None  # May be None if live
 TARGET_PATH_PARTIAL = None
 TARGET_DATE_STR = ""
 IS_LIVE_MODE = False
+TARGET_IDX_IN_FULL_SERIES = -1
 
 # 1. Determine Target Logic
 if TARGET_DATE:
@@ -399,19 +410,21 @@ if TARGET_DATE:
         if not date_indices:
             raise ValueError(f"Date {TARGET_DATE} not found in valid history.")
 
-        TARGET_IDX = date_indices[0]
+        TARGET_IDX_IN_FULL_SERIES = date_indices[0]
 
-        # Remove target from library so we don't match with self
-        library_indices = np.arange(len(series_matrix)) != TARGET_IDX
-        library_matrix = series_matrix[library_indices]
-        library_dates = [d for i, d in enumerate(valid_dates) if i != TARGET_IDX]
+        # Remove target from library so we don't match with self.
+        # Remove target from library so we don't match with self.
+        # Future Leakage Prevention:
+        # When simulating a past date, we must exclude all dates AFTER the target.
+        # This prevents the algorithm from "seeing" the future, ensuring a realistic backtest
+        # where the best match cannot be the day immediately following the target.
+        target_indices_to_exclude = list(range(TARGET_IDX_IN_FULL_SERIES, len(series_matrix)))
 
-        TARGET_PATH_FULL = series_matrix[TARGET_IDX]
-        TARGET_DATE_STR = str(valid_dates[TARGET_IDX])
+        TARGET_PATH_FULL = series_matrix[TARGET_IDX_IN_FULL_SERIES]
+        TARGET_DATE_STR = str(valid_dates[TARGET_IDX_IN_FULL_SERIES])
 
     except Exception as e:
         print(f"Error finding date {TARGET_DATE}: {e}")
-        # Fallback would happen here if we wanted loopback, but let's just raise/stop for clarity
         raise
 else:
     # --- B. Auto Mode (Live or Last Complete) ---
@@ -424,18 +437,18 @@ else:
         # In live mode, we simply use the current length of the day
         HOURS_TO_TEST = [len(LIVE_DAY_SERIES)]
 
-        # Library is full series_matrix (since live day is effectively 'new N+1' day)
+        # Target is "New", so it's not in the historic series_matrix.
+        # We don't need to exclude anything from history.
+        TARGET_IDX_IN_FULL_SERIES = len(series_matrix)  # Hypothetical next index
+        target_indices_to_exclude = []
+
     else:
         print("Mode: No incomplete live data. Using LAST complete day.")
-        TARGET_IDX = len(series_matrix) - 1
+        TARGET_IDX_IN_FULL_SERIES = len(series_matrix) - 1
+        target_indices_to_exclude = [TARGET_IDX_IN_FULL_SERIES]
 
-        # Remove target from library
-        library_indices = np.arange(len(series_matrix)) != TARGET_IDX
-        library_matrix = series_matrix[library_indices]
-        library_dates = [d for i, d in enumerate(valid_dates) if i != TARGET_IDX]
-
-        TARGET_PATH_FULL = series_matrix[TARGET_IDX]
-        TARGET_DATE_STR = str(valid_dates[TARGET_IDX])
+        TARGET_PATH_FULL = series_matrix[TARGET_IDX_IN_FULL_SERIES]
+        TARGET_DATE_STR = str(valid_dates[TARGET_IDX_IN_FULL_SERIES])
 
 
 # 3. Dynamic Subplot Grid Calculation
@@ -446,59 +459,138 @@ RANK_STYLES = {
 }
 
 NUM_PLOTS = len(HOURS_TO_TEST)
-COLS = 2
+COLS = min(NUM_PLOTS, 2)
 ROWS = math.ceil(NUM_PLOTS / COLS)
 
 fig_match = make_subplots(
     rows=ROWS,
     cols=COLS,
-    subplot_titles=[f"Input: {h} Hours" for h in HOURS_TO_TEST],
+    subplot_titles=[f"Input: {h} Hours (Window: {MATCHING_WINDOW_DAYS} Days)" for h in HOURS_TO_TEST],
     shared_yaxes=True,
-    x_title="Hour of Day",
+    x_title="Hour of Day (Relative)",
     y_title="Log Return",
 )
 
-# 4. Run Matching & Plotting
-for i, hours_val in enumerate(HOURS_TO_TEST):
-    # Determine row and col (1-based for Plotly)
-    r = (i // COLS) + 1
-    c = (i % COLS) + 1
 
-    # a. Slice the input
+# helper to fetch history vector
+def get_lookback_vector(matrix: np.ndarray, pivot_idx: int, days_back: int) -> Any:
+    """Concatenates previous `days_back` full days preceding `pivot_idx`."""
+    if days_back <= 0:
+        return np.array([])
+    start = pivot_idx - days_back
+    if start < 0:
+        return None  # Not enough history
+
+    # Extract segments
+    segments = []
+    for i_seg in range(days_back):
+        segments.append(matrix[start + i_seg])
+    return np.concatenate(segments)
+
+
+# 4. Run Matching & Plotting
+for plot_idx, hours_val in enumerate(HOURS_TO_TEST):
+    # Determine row and col (1-based for Plotly)
+    r = (plot_idx // COLS) + 1
+    c = (plot_idx % COLS) + 1
+
+    # --- A. Prepare Target Vector ---
+    # 1. Partial input component
     if IS_LIVE_MODE and TARGET_PATH_PARTIAL is not None:
-        # Just use what we have (should match hours_val)
-        partial_input = TARGET_PATH_PARTIAL
+        target_current_partial = TARGET_PATH_PARTIAL
     elif TARGET_PATH_FULL is not None:
-        partial_input = TARGET_PATH_FULL[:hours_val]
+        target_current_partial = TARGET_PATH_FULL[:hours_val]
     else:
-        # Fallback safety
+        continue  # Should not happen
+
+    # 2. History lookback component
+    # We need the history preceding the Target.
+    # If Live, TARGET_IDX_IN_FULL_SERIES is len(series_matrix), so we look back from end.
+    # If Historic, TARGET_IDX_IN_FULL_SERIES is the index of the target day, look back from there.
+
+    LOOKBACK_WINDOW = MATCHING_WINDOW_DAYS - 1
+    target_Lookback_vec = get_lookback_vector(series_matrix, TARGET_IDX_IN_FULL_SERIES, LOOKBACK_WINDOW)
+
+    if target_Lookback_vec is None:
+        print(f"Not enough history for target to satisfy window {MATCHING_WINDOW_DAYS}. Skipping.")
         continue
 
-    # b. Find nearest neighbors (Top-N)
-    top_matches = find_nearest_neighbors(partial_input, library_matrix, n_neighbors=NUM_MATCHES)
+    full_target_vector = np.concatenate([target_Lookback_vec, target_current_partial])
 
-    # c. Plotting
+    # --- B. Prepare Library Vectors ---
+    # We need to build a library where each entry corresponds to a day in series_matrix
+    # BUT constructed with the same structure: [History(D-1) ... History(1), Current(k)]
 
-    # Trace 1: The Matched Historical Paths (Loop through Top-N)
+    candidate_vectors = []
+    candidate_indices = []  # Indices in the original series_matrix
+
+    for idx_lib, day_path in enumerate(series_matrix):
+        if idx_lib in target_indices_to_exclude:
+            continue
+
+        # 1. Lookback
+        lib_lookback_vec = get_lookback_vector(series_matrix, idx_lib, LOOKBACK_WINDOW)
+        if lib_lookback_vec is None:
+            continue
+
+        # 2. Current Partial
+        lib_current_partial = day_path[:hours_val]
+
+        # Combine
+        full_lib_vector = np.concatenate([lib_lookback_vec, lib_current_partial])
+
+        candidate_vectors.append(full_lib_vector)
+        candidate_indices.append(idx_lib)
+
+    library_search_matrix = np.array(candidate_vectors)
+
+    if len(library_search_matrix) == 0:
+        print("Empty library after lookback filtering.")
+        continue
+
+    # --- C. Find Nearest Neighbors ---
+    # We match against the extended vectors
+    top_matches = find_nearest_neighbors(full_target_vector, library_search_matrix, n_neighbors=NUM_MATCHES)
+
+    # --- D. Plotting setup ---
+    # X-axis construction
+    # We have lookback_window * 24 hours of history, plus 24 hours of current day (future placeholder)
+    # 0 is the start of the current day.
+    # History is negative hours.
+
+    HISTORY_HOURS = LOOKBACK_WINDOW * 24
+    # Create x-axis for plotting the FULL matched paths (History + Full Current Day)
+    # Range: from -HISTORY_HOURS to 23
+    plot_x_axis = np.arange(-HISTORY_HOURS, 24)
+
+    # We need to map the matched index in `library_search_matrix` back to `candidate_indices`
+    # to retrieve the REAL full day for plotting the "Future" part of the match.
+
+    show_legend = plot_idx == 0
+
+    # Trace 1: The Matched Historical Paths
     for match in top_matches:
         match_rank = match["rank"]
-        matched_path_data = match["matched_path"]
-        matched_idx_lib = match["index"]
-        matched_date_label = library_dates[matched_idx_lib]
+        # local index in the search matrix
+        # actual index in `series_matrix`
+        real_idx_lib = candidate_indices[match["index"]]
 
-        # Vary line style or opacity based on rank if desired
-        # Rank 1: Blue, Dot
-        # Rank 2: lighter Blue, DashDot
-        # Rank 3: cyan?
+        matched_date_label = library_dates[real_idx_lib]
+
+        # Get the full data for plotting: History + Full Current Day
+        # History
+        hist_part = get_lookback_vector(series_matrix, real_idx_lib, LOOKBACK_WINDOW)
+        # Current Full Day
+        curr_part = series_matrix[real_idx_lib]
+
+        plot_data = np.concatenate([hist_part, curr_part])
 
         style = RANK_STYLES.get(match_rank, RANK_STYLES["default"])
 
-        show_legend = i == 0  # Only show legend for first subplot to avoid duplicates
-
         fig_match.add_trace(
             go.Scatter(
-                x=time_steps,
-                y=matched_path_data,
+                x=plot_x_axis,
+                y=plot_data,
                 mode="lines",
                 line={"color": style["color"], "width": style["width"], "dash": style["dash"]},
                 name=f"Rank {match_rank}: {matched_date_label}",
@@ -508,41 +600,72 @@ for i, hours_val in enumerate(HOURS_TO_TEST):
             col=c,
         )
 
-    # Trace 2: The 'Future' of the Target Path (Ground Truth)
-    # Only if we have it (Historic Mode)
-    if not IS_LIVE_MODE and TARGET_PATH_FULL is not None:
+    # Trace 2: The Target Path (History + [Current Partial ... Future?])
+
+    # Construct Target Plot Data
+    # History part is already in target_Lookback_vec
+
+    # Current Part:
+    # If Live: We only have partial.
+    # If Historic: We have full.
+
+    if IS_LIVE_MODE:
+        # For live, we can only plot History + Partial
+        # We need a specific x-axis for this trace since it's shorter
+        target_len = len(target_Lookback_vec) + len(target_current_partial)
+        # Start from -HISTORY_HOURS. Length is target_len.
+        target_x_axis = np.arange(-HISTORY_HOURS, -HISTORY_HOURS + target_len)
+
+        target_plot_data = np.concatenate([target_Lookback_vec, target_current_partial])
+
+    else:
+        # Historic: We can plot History + Full Current (Ground Truth)
+        target_x_axis = plot_x_axis
+        target_plot_data = np.concatenate([target_Lookback_vec, TARGET_PATH_FULL])
+
+    # Plot Ground Truth (Grey) - Only if Historic
+    if not IS_LIVE_MODE:
         fig_match.add_trace(
             go.Scatter(
-                x=time_steps,
-                y=TARGET_PATH_FULL,
+                x=target_x_axis,
+                y=target_plot_data,
                 mode="lines",
                 line={"color": "grey", "width": 1},
                 name="Actual Full Path",
-                showlegend=(i == 0),
+                showlegend=show_legend,
             ),
             row=r,
             col=c,
         )
 
-    # Trace 3: The Input Partial Path (What we observed)
+    # Trace 3: The Observed Input (Black)
+    # History + Current Partial
+    # (In live mode, this duplicates Trace 2 essentially, but styling differs)
+
+    obs_x_axis = np.arange(-HISTORY_HOURS, -HISTORY_HOURS + len(full_target_vector))
+
     fig_match.add_trace(
         go.Scatter(
-            x=time_steps[:hours_val],
-            y=partial_input,
+            x=obs_x_axis,
+            y=full_target_vector,
             mode="lines+markers",
             line={"color": "black", "width": 3},
-            marker={"size": 6},
+            marker={"size": 4},
             name="Observed Input",
-            showlegend=(i == 0),
+            showlegend=show_legend,
         ),
         row=r,
         col=c,
     )
 
+    # Add a vertical line at 0 to separate Past Days from Current Day
+    fig_match.add_vline(x=0, line_width=1, line_dash="solid", line_color="black", row=r, col=c)
+
+
 fig_match.update_layout(
-    title=f"Partial Path Matching (Top {NUM_MATCHES}): Simulating Forecasting for {TARGET_DATE_STR}",
-    height=max(500, 400 * ROWS),  # Adjust height based on rows
-    width=1000,
+    title=f"Partial Path Matching ({MATCHING_WINDOW_DAYS}-Day Window): Forecasting for {TARGET_DATE_STR}",
+    height=max(500, 500 * ROWS),  # Adjust height based on rows (500px per row)
+    width=1200,  # Increased width for better scaling
     template="plotly_white",
     hovermode="x unified",
 )
