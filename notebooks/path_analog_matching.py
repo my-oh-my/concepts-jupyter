@@ -27,6 +27,7 @@
 # %%
 # pylint: disable=duplicate-code
 import math
+from typing import Any, Dict, List, cast
 
 import numpy as np
 import pandas as pd
@@ -42,7 +43,7 @@ from src.dataio.yfinance_loader import fetch_market_data
 
 # %%
 # 1. Data Source Settings
-SYMBOL = "ETH-USD"
+SYMBOL = "DNP.WA"
 PERIOD = "730d"
 INTERVAL = "1h"
 
@@ -50,20 +51,27 @@ INTERVAL = "1h"
 # Options: "Close", "OHLC_Avg" (uses average of O+H+L+C)
 PRICE_METHOD = "OHLC_Avg"
 
-# 3. Matching Algorithm Settings
+# 3. Session Settings
+# Use 'UTC' for Crypto or specific timezones like 'America/New_York' for SPY
+TIMEZONE = "Europe/Warsaw"
+SESSION_START = 9  # 09:30-10:30 is the first full 1h candle in many feeds, or 9:00 for pre-open
+SESSION_END = 17  # 15:00-16:00 is the last candle. Set to 15 for 16:00 close.
+
+# 4. Matching Algorithm Settings
 # Define the hours you want to check for partial matching
-HOURS_TO_TEST = [6, 12, 18, 23]
+# (Should be within the session length)
+HOURS_TO_TEST = [3, 5, 7]
 
 # Number of nearest neighbors (top matches) to find
 NUM_MATCHES = 3
 
 # Matching Window: Number of days to use for matching context (Current + History).
-MATCHING_WINDOW_DAYS = 7
+MATCHING_WINDOW_DAYS = 10
 
 # Future Sessions: Number of full days to show after the matched day.
 FUTURE_SESSIONS = 3
 
-# 4. Target Settings
+# 5. Target Settings
 # Define a specific target date to analyze (YYYY-MM-DD or None for Live/Last).
 TARGET_DATE = None
 
@@ -100,10 +108,16 @@ df_full = df_raw[["Open", "High", "Low", "Close", PRICE_COL]].copy()
 df_full.dropna(inplace=True)
 
 # Transform into Daily Returns matrix
-daily_matrix_df, LIVE_DAY_SERIES, LIVE_DAY_DATE = reshape_to_daily_matrix(df_full, price_col=PRICE_COL)
-series_matrix, valid_dates = calculate_daily_log_returns(daily_matrix_df)
+daily_matrix_df, LIVE_DAY_SERIES, LIVE_DAY_DATE = reshape_to_daily_matrix(
+    df_full, price_col=PRICE_COL, tz=TIMEZONE, session_start=SESSION_START, session_end=SESSION_END
+)
 
-print(f"Data reshaped ({PRICE_METHOD}). Complete days: {len(daily_matrix_df)}")
+SESSION_LENGTH = SESSION_END - SESSION_START + 1
+
+series_matrix, valid_dates = calculate_daily_log_returns(daily_matrix_df, _session_end=SESSION_END)
+
+print(f"Data reshaped ({PRICE_METHOD}). Session: {SESSION_START}:00-{SESSION_END}:00 ({TIMEZONE})")
+print(f"Complete days: {len(daily_matrix_df)}")
 print(f"Series Matrix shape: {series_matrix.shape}")
 
 # %% [markdown]
@@ -130,6 +144,11 @@ TARGET_IDX_IN_FULL_SERIES = -1
 # ## 3. Matching Execution & Plotting
 
 # %%
+# Adjust HOURS_TO_TEST if it exceeds session length
+HOURS_TO_TEST = [h for h in HOURS_TO_TEST if h <= SESSION_LENGTH]
+if not HOURS_TO_TEST and not TARGET_DATE and LIVE_DAY_SERIES is not None:
+    HOURS_TO_TEST = [len(LIVE_DAY_SERIES)]
+
 # 1. Determine Target Logic
 if TARGET_DATE:
     print(f"Mode: Historic Specific Date ({TARGET_DATE})")
@@ -179,7 +198,7 @@ fig_match = make_subplots(
 )
 
 # Shared reference for candle chart (collected during loop)
-MATCH_DATA_FOR_CANDLES = []
+MATCH_DATA_FOR_CANDLES: List[Dict[str, Any]] = []
 
 # 3. Main Loop
 for plot_idx, hours_val in enumerate(HOURS_TO_TEST):
@@ -220,8 +239,8 @@ for plot_idx, hours_val in enumerate(HOURS_TO_TEST):
     top_matches = find_nearest_neighbors(full_target_vector, library_search_matrix, n_neighbors=NUM_MATCHES)
 
     # Plotting Horizon
-    HISTORY_HOURS, FUTURE_HOURS = LOOKBACK_WINDOW * 24, FUTURE_SESSIONS * 24
-    plot_x_axis = np.arange(-HISTORY_HOURS, 24 + FUTURE_HOURS)
+    HISTORY_HOURS, FUTURE_HOURS = LOOKBACK_WINDOW * SESSION_LENGTH, FUTURE_SESSIONS * SESSION_LENGTH
+    plot_x_axis = np.arange(-HISTORY_HOURS, SESSION_LENGTH + FUTURE_HOURS)
 
     show_legend = plot_idx == 0
 
@@ -291,7 +310,8 @@ for plot_idx, hours_val in enumerate(HOURS_TO_TEST):
     )
 
     # Session Borders
-    for hour_mark in range(-HISTORY_HOURS, 24 + FUTURE_HOURS + 1, 24):
+    for i in range(-LOOKBACK_WINDOW, FUTURE_SESSIONS + 2):
+        hour_mark = i * SESSION_LENGTH
         fig_match.add_vline(x=hour_mark, line_width=1, line_dash="solid", line_color="black", opacity=0.3, row=r, col=c)
     fig_match.add_vline(x=0, line_width=2, line_dash="solid", line_color="black", row=r, col=c)
 
@@ -301,7 +321,7 @@ fig_match.update_layout(
     width=1200,
     template="plotly_white",
     hovermode="x unified",
-    xaxis_title="Relative Hour (0 = Target Start)",
+    xaxis_title="Relative Session Hour (0 = Target Start)",
     yaxis_title=f"Log Return ({PRICE_METHOD})",
 )
 fig_match.show()
@@ -314,59 +334,56 @@ fig_match.show()
 # 1. Setup Candle Figure
 fig_candles = go.Figure()
 
-# Plotting Horizon (same as above)
+# Plotting Horizon
 HISTORY_DAYS = LOOKBACK_WINDOW
-
-# Determine session hours for normalization and display
-# We need to find the correct slice in df_full for each match.
 
 for match in MATCH_DATA_FOR_CANDLES:
     rank = match["rank"]
     match_date = match["date"]
     style = match["style"]
 
-    # Target date reference in df_full
-    # We need to find the previous day's close for normalization
     try:
-        # Find index of match_date in our valid_dates list to find neighbors in time
+        # Find index of match_date in our valid_dates list
         match_idx_in_history = [i for i, d in enumerate(valid_dates) if d == match_date][0]
 
-        # Collect full path indices (Lookback + Current + Lookforward)
-        # We'll use the daily_matrix_df index which is Dates
-        all_match_dates: list = []
-        if LOOKBACK_WINDOW > 0:
-            # We need consecutive days.
-            # Let's find the contiguous block in daily_matrix_df
-            current_day_pos = daily_matrix_df.index.get_loc(match_date)
-            start_pos = current_day_pos - LOOKBACK_WINDOW  # type: ignore
-            end_pos = current_day_pos + FUTURE_SESSIONS + 1  # type: ignore
-            block_dates = daily_matrix_df.index[start_pos:end_pos]
+        # Collect full path indices
+        current_day_pos = daily_matrix_df.index.get_loc(match_date)
+        start_pos = current_day_pos - LOOKBACK_WINDOW  # type: ignore
+        end_pos = current_day_pos + FUTURE_SESSIONS + 1  # type: ignore
+        block_dates = daily_matrix_df.index[start_pos:end_pos]
+
+        # Get OHLC data for these dates, localized to the target timezone
+        match_df = df_full.copy()
+        m_idx = cast(pd.DatetimeIndex, match_df.index)
+        if m_idx.tz is None:
+            match_df.index = m_idx.tz_localize("UTC").tz_convert(TIMEZONE)
         else:
-            block_dates = [match_date]  # type: ignore
+            match_df.index = m_idx.tz_convert(TIMEZONE)
 
-        # Get OHLC data for these dates
-        match_df = df_full[pd.Index(df_full.index.date).isin(block_dates)].copy()  # type: ignore
+        # refresh index reference
+        m_idx = match_df.index
 
-        # Find P0 (Previous day's hour 23 close) for normalization
-        # P0 is the price at the end of the day BEFORE the first day of our plot
-        first_plot_day = block_dates[0]
-        prev_day_pos = daily_matrix_df.index.get_loc(first_plot_day) - 1  # type: ignore
-        p0_price = daily_matrix_df.iloc[prev_day_pos][23]
+        # Filter for session hours and dates
+        match_df["Hour"] = m_idx.hour
+        match_df = match_df[(m_idx.date >= block_dates[0]) & (m_idx.date <= block_dates[-1])]
+        match_df = match_df[(match_df["Hour"] >= SESSION_START) & (match_df["Hour"] <= SESSION_END)]
+
+        # Find P0 for normalization (last price of the session before the block)
+        prev_session_day = daily_matrix_df.index[start_pos - 1]
+        p0_price = daily_matrix_df.loc[prev_session_day, SESSION_END]
 
         # Normalize
         for col in ["Open", "High", "Low", "Close"]:
             match_df[col] = match_df[col] / p0_price
 
-        # Create X-axis dummy datetimes for this match
-        # Match_df is 1h interval, sorted by datetime.
-        # We need to align it with our base_dt_candles.
-        # Time 0 (match_date 00:00) should align with base_dt_candles
+        # Map to relative session hours
+        # We need a way to map (Day, Hour) to a linear session index
+        def get_rel_session_hour(dt: Any, b_dates: Any = block_dates) -> int:
+            day_idx = (b_dates == dt.date()).argmax() - LOOKBACK_WINDOW
+            hour_in_session = dt.hour - SESSION_START
+            return int(day_idx * SESSION_LENGTH + hour_in_session)
 
-        match_ref_dt = pd.Timestamp(match_date)
-        if match_df.index.tz is not None:  # type: ignore
-            match_ref_dt = match_ref_dt.tz_localize(match_df.index.tz)  # type: ignore
-
-        match_df["Relative_Hours"] = (match_df.index - match_ref_dt).total_seconds() / 3600  # type: ignore
+        match_df["Relative_Hours"] = match_df.index.map(get_rel_session_hour)
 
         fig_candles.add_trace(
             go.Candlestick(
@@ -382,47 +399,50 @@ for match in MATCH_DATA_FOR_CANDLES:
                 showlegend=True,
             )
         )
-    except (ValueError, IndexError, KeyError, TypeError, RuntimeError) as e:
-        print(f"Error plotting candles for {match_date}: {e}")
+    except (ValueError, IndexError, KeyError):
+        print(f"Error plotting candles for {match_date}")
 
 # 2. Add Target Path as candles
 try:
     target_date_val = valid_dates[TARGET_IDX_IN_FULL_SERIES] if not IS_LIVE_MODE else LIVE_DAY_DATE
 
     # Collect target days
-    if LOOKBACK_WINDOW > 0:
-        if not IS_LIVE_MODE:
-            target_pos = daily_matrix_df.index.get_loc(target_date_val)
-            start_pos_t = target_pos - LOOKBACK_WINDOW  # type: ignore
-            end_pos_t = target_pos + FUTURE_SESSIONS + 1  # type: ignore
-            target_block_dates = daily_matrix_df.index[start_pos_t:end_pos_t]
-        else:
-            # Live case: last N days from matrix + live day
-            target_block_dates = list(daily_matrix_df.index[-LOOKBACK_WINDOW:]) + [LIVE_DAY_DATE]  # type: ignore
-    else:
-        target_block_dates = [target_date_val]  # type: ignore
+    target_pos = daily_matrix_df.index.get_loc(target_date_val)
+    start_pos_t = target_pos - LOOKBACK_WINDOW  # type: ignore
+    end_pos_t = target_pos + FUTURE_SESSIONS + 1  # type: ignore
+    target_block_dates = daily_matrix_df.index[start_pos_t:end_pos_t]
 
-    target_candle_df = df_full[pd.Index(df_full.index.date).isin(target_block_dates)].copy()  # type: ignore
+    target_candle_df = df_full.copy()
+    t_idx = cast(pd.DatetimeIndex, target_candle_df.index)
+    if t_idx.tz is None:
+        target_candle_df.index = t_idx.tz_localize("UTC").tz_convert(TIMEZONE)
+    else:
+        target_candle_df.index = t_idx.tz_convert(TIMEZONE)
+
+    # refresh index reference
+    t_idx = target_candle_df.index
+    target_candle_df["Hour"] = t_idx.hour
+    t_d_mask = (t_idx.date >= target_block_dates[0]) & (t_idx.date <= target_block_dates[-1])
+    target_candle_df = target_candle_df[t_d_mask]
+    target_candle_df = target_candle_df[
+        (target_candle_df["Hour"] >= SESSION_START) & (target_candle_df["Hour"] <= SESSION_END)
+    ]
 
     if not target_candle_df.empty:
         # Find P0 for Target
-        # For target, we use the same relative P0 logic
-        first_target_day = target_block_dates[0]
-        target_pos_raw = daily_matrix_df.index.get_loc(first_target_day)
-        target_prev_day_pos = (target_pos_raw if isinstance(target_pos_raw, int) else 0) - 1
-        target_p0_price = daily_matrix_df.iloc[target_prev_day_pos][23]
+        prev_target_session_day = daily_matrix_df.index[start_pos_t - 1]
+        target_p0_price = daily_matrix_df.loc[prev_target_session_day, SESSION_END]
 
         # Normalize
         for col in ["Open", "High", "Low", "Close"]:
             target_candle_df[col] = target_candle_df[col] / target_p0_price
 
-        # X alignment (ensure no None)
-        target_ref_dt = pd.Timestamp(target_date_val) if target_date_val else pd.Timestamp.now()
-        if target_candle_df.index.tz is not None:  # type: ignore
-            target_ref_dt = target_ref_dt.tz_localize(target_candle_df.index.tz)  # type: ignore
+        def get_rel_target_session_hour(dt: Any, tb_dates: Any = target_block_dates) -> int:
+            day_idx = (tb_dates == dt.date()).argmax() - LOOKBACK_WINDOW
+            hour_in_session = dt.hour - SESSION_START
+            return int(day_idx * SESSION_LENGTH + hour_in_session)
 
-        rel_hours = (pd.Series(target_candle_df.index) - target_ref_dt).dt.total_seconds().values
-        target_candle_df["Relative_Hours"] = rel_hours / 3600  # type: ignore
+        target_candle_df["Relative_Hours"] = target_candle_df.index.map(get_rel_target_session_hour)
 
         fig_candles.add_trace(
             go.Candlestick(
@@ -438,19 +458,18 @@ try:
                 showlegend=True,
             )
         )
-    else:
-        print(f"Warning: No OHLC data found for target dates: {target_block_dates}")
-except (ValueError, IndexError, KeyError, TypeError, RuntimeError) as e:
-    print(f"Error plotting target candles: {e}")
+except (ValueError, IndexError, KeyError):
+    print(f"Error plotting target candles: {target_date_val}")
 
 # 3. Final Layout
-for hour_mark in range(-HISTORY_HOURS, 24 + FUTURE_HOURS + 1, 24):
+for i in range(-LOOKBACK_WINDOW, FUTURE_SESSIONS + 2):
+    hour_mark = i * SESSION_LENGTH
     fig_candles.add_vline(x=hour_mark, line_width=1, line_dash="solid", line_color="black", opacity=0.3)
 fig_candles.add_vline(x=0, line_width=2, line_dash="solid", line_color="black")
 
 fig_candles.update_layout(
     title=f"Normalized Candle Comparison for {SYMBOL} ({TARGET_DATE_STR})",
-    xaxis_title="Relative Hour (0 = Target Start)",
+    xaxis_title="Relative Session Hour (0 = Target Start)",
     yaxis_title="Relative Price (P / P0)",
     template="plotly_white",
     height=700,
